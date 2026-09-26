@@ -4,11 +4,12 @@
 **Team Members:** [List all team members]
 **Submission Date:** [Date]
 
-> **STATUS: DRAFT — metric fields marked `TBD` are not yet filled.** Numbers will be
-> taken from the pipeline's own output (`train.py` prints the blocking recall
-> ceiling, candidate-set statistics, the tuned threshold and the validation macro
-> F_0.5, and writes them to `code/business_entity_resolution/model/model_meta.json`).
-> No number in this document is to be written by hand.
+> **STATUS: training metrics filled from the full-scale run; test-set candidate
+> statistics still marked `TBD` pending the prediction pass.** Every number here is
+> taken from the pipeline's own output (`train.py` prints the blocking recall ceiling,
+> candidate-set statistics, the tuned threshold and the validation macro F_0.5, and
+> writes them to `code/business_entity_resolution/model/model_meta.json`). No number
+> in this document is written by hand.
 
 ---
 
@@ -106,9 +107,29 @@ with no usable candidates at all. Raising the cutoff and switching to IDF rankin
 nearly doubled recall while holding the candidate set at 60/entity. TOP_K=60 buys
 further recall but doubles the candidate set, which the challenge penalises.
 
+Measured on the full-scale run (220,682 Source-1 training entities, blocked against
+the complete 5.03M-record Source 2 and 5.29M-record Source 3):
+
+- **Blocking recall ceiling:** 522,737 / 763,411 = **0.6847**
+- **Candidate pairs generated:** 12,679,761
+- **Candidates per Source-1 entity:** mean 57.5, median 60, max 60 (cap is 30 per
+  source). Against ~10.3M candidate records per entity, that is a reduction ratio of
+  roughly 1 : 180,000.
+- **Entities with zero candidates:** 825 of 220,682 (0.37%)
 - **Candidate pairs generated (test):** TBD
 - **Candidates per Source-1 entity (test):** TBD
-- **Blocking recall ceiling (held-out train):** TBD (full-scale run)
+
+A pre-ranking prune drops pairs whose summed IDF is below 10 before the top-K sort.
+This is calibrated, not guessed: among candidates that actually survive into top-K the
+1st-percentile score is 8.9, so the threshold costs 5 true pairs in 17,262
+(recall 0.6837 -> 0.6834 on the calibration sample) while removing the bulk of the
+join's output. At 16 recall falls to 0.644 and at 22 to 0.486.
+
+*Known limitation:* that threshold is an absolute value on a scale-dependent score
+(`idf = log1p(n_docs/df)` grows with corpus size), so it is calibrated to this
+corpus and would need re-calibration on a materially different one. It is documented
+at the constant in `blocking.py`, and the module self-check neutralises it rather
+than silently depending on it.
 
 `candidate_pairs.tsv` is written from the exact dataframe that is then fed to the
 model — one code path, so the audited candidate set cannot diverge from what
@@ -143,18 +164,34 @@ population includes entities for which blocking found *nothing*: they are still
 scored by the metric (1.0 if truly singletons, 0.0 otherwise), and excluding them
 would bias both the threshold and the reported score.
 
-- **Tuned threshold:** TBD
-- **Validation macro F_0.5:** TBD
+- **Tuned threshold:** 0.60
+- **Validation macro F_0.5:** **0.7028**
+- Validation AUCPR 0.9741 (train 0.9750 — train and validation track each other
+  closely across all 300 rounds, so the model is not overfitting and early stopping
+  never triggered)
+- 11,412,876 training pairs (470,285 positive) / 1,266,885 validation pairs
+  (52,452 positive), split by Source-1 entity id
 
 ---
 
 ## 5. Results & Error Analysis
 
-- **F_0.5 Score (macro, held-out validation):** TBD
-- **Blocking recall ceiling:** TBD — this is the dominant constraint on the score.
-  With perfect precision, a recall of *r* caps per-entity F_0.5 at
-  `1.25r / (0.25 + r)`, so lifting blocking recall is worth more than any further
-  classifier tuning.
+- **F_0.5 Score (macro, held-out validation): 0.7028**
+- **Where the remaining gap is.** With perfect precision, a recall of *r* caps
+  per-entity F_0.5 at `1.25r / (0.25 + r)`. At our recall ceiling of 0.6847 that is
+  0.916, or roughly **0.92** macro once correctly-predicted singletons (which score a
+  full 1.0) are mixed in. We score 0.703 against that ~0.92 ceiling, so the loss
+  splits across two causes rather than one:
+  1. *Blocking recall* caps the achievable score at ~0.92.
+  2. *The selection rule* costs most of the remaining ~0.21. The classifier ranks
+     well (AUCPR 0.974), so the loss is not ranking quality — it is that a single
+     global probability threshold is a crude decision rule for a metric averaged
+     **per entity**. An entity with four true matches and one false positive is
+     penalised very differently from one with a single confident match, yet both are
+     judged at the same cutoff.
+
+  This corrects an assumption we held early on, that blocking recall was the whole
+  story. It is the larger single lever, but not the only one.
 - **Common false negatives (missed matches):** dominated by pairs lost at blocking
   rather than rejected by the classifier. Categories identified: cross-script
   transliteration where the phonetic Latin form shares no whole token with the
@@ -166,14 +203,31 @@ would bias both the threshold and the reported score.
 
 ### Known limitations / next steps
 
-1. **Character n-gram blocking keys**, to catch typos and domain-style names that
-   whole-word matching cannot see.
-2. **Cosine-normalised scoring** instead of a raw IDF sum. A raw sum rewards
-   candidates with many matching tokens, which may bias toward records with long
-   addresses (common for India); normalising by the candidate's IDF norm is the
-   standard correction.
-3. Trained on a 10% sample of Source-1 entities — ample for a ~10-feature model, but
-   the full set is available if the model proves data-limited.
+Ranked by expected value, based on the measurements above:
+
+1. **A per-entity selection rule** instead of one global threshold — see the gap
+   analysis above. This is the cheapest remaining win because it needs no change to
+   blocking and no re-blocking run.
+2. **Character n-gram blocking keys**, to catch typos and domain-style names
+   (`wilfordhancock.com`) that whole-word matching cannot see. Raising TOP_K from 30
+   to 60 is a measured alternative (recall 0.685 -> 0.727) but doubles the candidate
+   set, which the challenge penalises separately; n-grams should raise recall without
+   that cost.
+3. **Cosine-normalised scoring** instead of a raw IDF sum. A raw sum rewards
+   candidates matching many tokens, which may bias toward records with long addresses
+   (common for India); normalising by the candidate's IDF norm is the standard
+   correction.
+4. Trained on a 10% sample of Source-1 entities — ample for a ~10-feature model
+   (train and validation AUCPR agree to 0.001), but the full set is available if the
+   model ever proves data-limited.
+
+**A hypothesis we tested and rejected.** We initially expected cross-script
+transliteration to be the main recall gap, since India is ~47% of the test set and
+`unidecode` maps Devanagari to a phonetic Latin form that shares no whole token with
+the English spelling (`vijan` vs `vision`). Inspecting real matched pairs showed the
+*address* usually stays in Latin script even when the name does not, so those pairs
+are still reachable through address tokens. The lesson generalises: each recall theory
+was worth less than the measurement that tested it.
 
 ---
 
