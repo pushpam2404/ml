@@ -1,0 +1,19 @@
+{
+  "feature_cols": [
+    "name_jaccard",
+    "name_trigram_jaccard",
+    "name_token_sort_ratio",
+    "name_partial_ratio",
+    "name_len_diff",
+    "addr_jaccard",
+    "addr_ratio",
+    "pin_match",
+    "house_match",
+    "addr_empty_either"
+  ],
+  "threshold": 0.6000000000000001,
+  "val_macro_f0_5": 0.7027522417293229,
+  "blocking_recall_ceiling": 0.6847386270305248,
+  "n_train_pairs": 11412876,
+  "n_val_pairs": 1266885
+}
