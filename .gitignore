@@ -1,0 +1,8 @@
+student_resource/dataset/
+student_resource/output/
+student_resource/code/business_entity_resolution/.venv/
+student_resource/code/business_entity_resolution/model_dryrun/
+__pycache__/
+*.pyc
+.DS_Store
+*.mp4
