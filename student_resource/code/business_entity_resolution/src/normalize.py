@@ -66,20 +66,31 @@ def extract_house_number(addr_norm: pd.Series) -> pd.Series:
 
 
 def name_tokens(name_norm: pd.Series, min_len: int = 3) -> pd.Series:
-    """Token list per row, dropping short/suffix tokens used only as noise."""
+    """Distinct significant tokens per row, dropping short/legal-suffix noise words.
+
+    Each token appears at most once per record: a repeated word is not extra evidence,
+    and de-duplicating here is free, whereas de-duplicating the exploded index later
+    costs a hash over tens of millions of rows.
+    """
     stop = set(_SYNONYMS.values()) | {"the", "of", "for"}
 
     def toks(text: str):
-        return [t for t in text.split() if len(t) >= min_len and t not in stop]
+        return list(dict.fromkeys(
+            t for t in text.split() if len(t) >= min_len and t not in stop
+        ))
 
     return name_norm.map(toks)
 
 
 def addr_tokens(addr_norm: pd.Series, min_len: int = 3) -> pd.Series:
+    """Distinct significant address tokens per row (see name_tokens on de-duplication)."""
     stop = set(_ADDR_SYNONYMS.values())
 
     def toks(text: str):
-        return [t for t in text.split() if len(t) >= min_len and t not in stop and not t.isdigit()]
+        return list(dict.fromkeys(
+            t for t in text.split()
+            if len(t) >= min_len and t not in stop and not t.isdigit()
+        ))
 
     return addr_norm.map(toks)
 

@@ -28,14 +28,16 @@ MAX_TOKEN_DF = 3000  # drop tokens shared by more than this many candidates in a
 
 
 def _token_index(df: pd.DataFrame, id_col: str, text_col: str, tokenizer) -> pd.DataFrame:
-    """Tokenize a normalized text column into long (country, token, id) rows.
+    """Tokenize a normalized text column into long (country, token, <id_col>) rows.
 
     Tokens are derived here rather than stored on the source frames -- the list
     column costs ~1GB per source if kept, and is only ever needed transiently.
+    The tokenizers return each token once per record, so no global de-duplication
+    pass over the (much larger) exploded index is needed.
     """
     long = pd.DataFrame({
         "country": df["country"].to_numpy(),
-        "cand_id": df[id_col].to_numpy(),
+        id_col: df[id_col].to_numpy(),
         "token": tokenizer(df[text_col]).to_numpy(),
     }).explode("token")
     return long.dropna(subset=["token"])
@@ -55,8 +57,7 @@ def _weighted_index(index: pd.DataFrame, n_by_country: pd.Series,
     Each field (name / address / PIN) is weighted independently, so a token that is
     common in addresses but rare in names gets the right weight in each.
     """
-    index = index.drop_duplicates(["country", "token", "cand_id"]).reset_index(drop=True)
-    doc_freq = index.groupby(["country", "token"], sort=False)["cand_id"].transform("size").to_numpy()
+    doc_freq = index.groupby(["country", "token"], sort=False)["cand_code"].transform("size").to_numpy()
     keep = doc_freq <= max_df
     index = index.loc[keep].copy()
     n_docs = index["country"].map(n_by_country).to_numpy(dtype="float64")
@@ -65,40 +66,40 @@ def _weighted_index(index: pd.DataFrame, n_by_country: pd.Series,
 
 
 def _candidates_from_index(s1_long: pd.DataFrame, cand_index: pd.DataFrame, top_k: int) -> pd.DataFrame:
-    """Join S1 tokens to the candidate index on (country, token), sum IDF, keep top_k."""
+    """Join S1 tokens to the candidate index, sum IDF per pair, keep top_k per entity.
+
+    Both id columns are integer codes (`s1_code`, `cand_code`), never strings: the
+    join fans out to tens of millions of rows per chunk, and the group-by and sort
+    over that dominate blocking runtime. On int32 they are several times faster than
+    on object-dtype strings, and the index itself is an order of magnitude smaller.
+    Codes are assigned in lexicographic id order, so ordering by code is identical to
+    ordering by id and results are unchanged.
+    """
     merged = s1_long.merge(cand_index, on=["country", "token"], how="inner")
     if merged.empty:
-        return merged.reindex(columns=["source1_entity_id", "cand_id", "overlap"])
+        return merged.reindex(columns=["s1_code", "cand_code", "overlap"])
     overlap = (
-        merged.groupby(["source1_entity_id", "cand_id"], sort=False)["idf"]
+        merged.groupby(["s1_code", "cand_code"], sort=False)["idf"]
         .sum()
         .rename("overlap")
         .reset_index()
     )
-    # Deterministic tie-break on cand_id: scores tie often at the top-K boundary, and
-    # without a total order the surviving candidates would depend on row order -- which
-    # would make results vary with chunk size and the run non-reproducible.
+    # Deterministic tie-break: scores tie often at the top-K boundary, and without a
+    # total order the survivors would depend on row order -- results would vary with
+    # chunk size and the run would not be reproducible.
     overlap = overlap.sort_values(
-        ["overlap", "cand_id"], ascending=[False, True], kind="stable"
+        ["overlap", "cand_code"], ascending=[False, True], kind="stable"
     )
-    return overlap.groupby("source1_entity_id", sort=False).head(top_k)
+    return overlap.groupby("s1_code", sort=False).head(top_k)
 
 
 def _s1_long(s1: pd.DataFrame, fields=("name", "addr", "pin")) -> pd.DataFrame:
     """Build the long (country, token, source1_entity_id) frame for the S1 side."""
     parts = []
     if "name" in fields:
-        parts.append(
-            _token_index(s1, "source1_entity_id", "name_norm", name_tokens).rename(
-                columns={"cand_id": "source1_entity_id"}
-            )
-        )
+        parts.append(_token_index(s1, "source1_entity_id", "name_norm", name_tokens))
     if "addr" in fields:
-        parts.append(
-            _token_index(s1, "source1_entity_id", "addr_norm", addr_tokens).rename(
-                columns={"cand_id": "source1_entity_id"}
-            )
-        )
+        parts.append(_token_index(s1, "source1_entity_id", "addr_norm", addr_tokens))
     if "pin" in fields:
         parts.append(
             s1.loc[s1["pin"] != "", ["country", "pin", "source1_entity_id"]].rename(
@@ -110,23 +111,34 @@ def _s1_long(s1: pd.DataFrame, fields=("name", "addr", "pin")) -> pd.DataFrame:
 
 def _block_chunked(s1: pd.DataFrame, index: pd.DataFrame, top_k: int, fields,
                    chunk_rows: int = S1_CHUNK_ROWS, label: str = "") -> pd.DataFrame:
-    """Run the token join in S1 row-chunks.
+    """Run the token join in S1 row-chunks, returning [source1_entity_id, cand_code, overlap].
 
     The join's intermediate scales with the number of S1 rows fed in, so a
     single-shot merge over millions of S1 rows would materialise billions of rows
     before top-K ever trims it. Chunking bounds peak memory: the candidate index
     is built once by the caller, and only the already-capped per-chunk results are
     accumulated.
+
+    S1 ids are coded to ints per chunk (cheap -- one pass over the chunk's own tokens)
+    so the fanned-out group-by and sort run on integers, then mapped back on the small
+    capped result.
     """
     out = []
     n_chunks = max(1, -(-len(s1) // chunk_rows))
     for i, start in enumerate(range(0, len(s1), chunk_rows), 1):
         chunk = s1.iloc[start:start + chunk_rows]
-        out.append(_candidates_from_index(_s1_long(chunk, fields), index, top_k))
+        s1_long = _s1_long(chunk, fields)
+        codes, uniques = pd.factorize(s1_long["source1_entity_id"])
+        s1_long = s1_long.drop(columns=["source1_entity_id"])
+        s1_long["s1_code"] = codes.astype("int32")
+        res = _candidates_from_index(s1_long, index, top_k)
+        res = res.assign(source1_entity_id=uniques.take(res["s1_code"].to_numpy())) \
+                 .drop(columns=["s1_code"])
+        out.append(res)
         if n_chunks > 1:
             print(f"    [block{label}] chunk {i}/{n_chunks}", flush=True)
     if not out:
-        return pd.DataFrame(columns=["source1_entity_id", "cand_id", "overlap"])
+        return pd.DataFrame(columns=["source1_entity_id", "cand_code", "overlap"])
     return pd.concat(out, ignore_index=True)
 
 
@@ -134,14 +146,20 @@ def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str,
                      chunk_rows: int = S1_CHUNK_ROWS) -> pd.DataFrame:
     """Return top-K candidates per S1 from a single candidate source (S2 or S3)."""
     n_by_country = cand.groupby("country", sort=False).size()
-    name_idx = _weighted_index(_token_index(cand, "entity_id", "name_norm", name_tokens), n_by_country)
-    addr_idx = _weighted_index(_token_index(cand, "entity_id", "addr_norm", addr_tokens), n_by_country)
-    raw_pin_idx = cand.loc[cand["pin"] != "", ["country", "pin", "entity_id"]].rename(
-        columns={"pin": "token", "entity_id": "cand_id"}
+    # Code candidate ids to int32 once, in lexicographic order, so every downstream
+    # group-by/sort works on integers and ordering by code == ordering by id.
+    cand_codes, cand_uniques = pd.factorize(cand["entity_id"], sort=True)
+    coded = cand[["country", "name_norm", "addr_norm", "pin"]].copy()
+    coded["cand_code"] = cand_codes.astype("int32")
+
+    name_idx = _weighted_index(_token_index(coded, "cand_code", "name_norm", name_tokens), n_by_country)
+    addr_idx = _weighted_index(_token_index(coded, "cand_code", "addr_norm", addr_tokens), n_by_country)
+    raw_pin_idx = coded.loc[coded["pin"] != "", ["country", "pin", "cand_code"]].rename(
+        columns={"pin": "token"}
     )
     pin_idx = _weighted_index(raw_pin_idx, n_by_country)
     full_index = pd.concat([name_idx, addr_idx, pin_idx], ignore_index=True)
-    del name_idx, pin_idx, raw_pin_idx
+    del name_idx, pin_idx, raw_pin_idx, coded, cand_codes
 
     result = _block_chunked(
         s1, full_index, TOP_K, ("name", "addr", "pin"), chunk_rows, f" {source_label}"
@@ -157,6 +175,10 @@ def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str,
             f" {source_label}-fallback",
         )
         result = pd.concat([result, relaxed], ignore_index=True)
+
+    # map candidate codes back to real ids only on the small capped result
+    result["cand_id"] = cand_uniques.take(result["cand_code"].to_numpy())
+    result = result.drop(columns=["cand_code"])
 
     result["source"] = source_label
     return result[["source1_entity_id", "cand_id", "source", "overlap"]]
