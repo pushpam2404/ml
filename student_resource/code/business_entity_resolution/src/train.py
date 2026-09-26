@@ -21,9 +21,10 @@ import xgboost as xgb
 
 sys.path.insert(0, os.path.dirname(__file__))
 from blocking import generate_candidates
-from data_io import load_source, attach_pair_columns
+from data_io import load_source, build_side_lookups
 from evaluate import macro_f_beta
-from features import build_pair_features, FEATURE_COLS
+from features import FEATURE_COLS
+from score import build_features
 
 
 def load_ground_truth(path: str) -> dict:
@@ -77,9 +78,11 @@ def main():
     print(f"[train] blocking recall ceiling: {recovered}/{total_true} = {recall_ceiling:.4f}")
 
     print("[train] attaching features...")
-    pairs = attach_pair_columns(pairs, s1, s2, s3)
-    feats = build_pair_features(pairs)
-    pairs = pd.concat([pairs[["source1_entity_id", "cand_id"]], feats], axis=1)
+    s1_side, cand_side = build_side_lookups(s1, s2, s3)
+    feats = build_features(pairs, s1_side, cand_side)
+    pairs = pd.concat(
+        [pairs[["source1_entity_id", "cand_id"]].reset_index(drop=True), feats], axis=1
+    )
 
     pairs["label"] = [
         1 if cid in sampled_truth.get(s1id, ()) else 0

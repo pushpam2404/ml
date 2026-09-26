@@ -10,22 +10,26 @@ def load_source(path: str) -> pd.DataFrame:
     return prep_source(df)
 
 
-def attach_pair_columns(pairs: pd.DataFrame, s1: pd.DataFrame, s2: pd.DataFrame, s3: pd.DataFrame) -> pd.DataFrame:
-    """Join the S1-side and candidate-side prepped columns onto a pairs frame.
+def build_side_lookups(s1: pd.DataFrame, s2: pd.DataFrame, s3: pd.DataFrame):
+    """Build the two id-indexed lookup frames used to hydrate pair rows.
 
-    ``pairs`` needs source1_entity_id, cand_id, source (S2/S3).
+    Built once and reused across every pair chunk: an id-indexed frame lets pandas
+    reuse its hash index on each join instead of re-hashing 10M candidate rows per
+    chunk.
     """
-    s1_side = s1[["source1_entity_id"] + PREP_COLS].rename(
-        columns={c: f"{c}_1" for c in PREP_COLS}
-    )
-    cand_all = pd.concat(
-        [
-            s2[["entity_id"] + PREP_COLS].rename(columns={"entity_id": "cand_id"}),
-            s3[["entity_id"] + PREP_COLS].rename(columns={"entity_id": "cand_id"}),
-        ],
+    s1_side = s1.set_index("source1_entity_id")[PREP_COLS].add_suffix("_1")
+    cand_side = pd.concat(
+        [s2[["entity_id"] + PREP_COLS], s3[["entity_id"] + PREP_COLS]],
         ignore_index=True,
-    ).rename(columns={c: f"{c}_2" for c in PREP_COLS})
+    ).set_index("entity_id")[PREP_COLS].add_suffix("_2")
+    return s1_side, cand_side
 
-    out = pairs.merge(s1_side, on="source1_entity_id", how="left")
-    out = out.merge(cand_all, on="cand_id", how="left")
-    return out
+
+def attach_pair_columns(pairs: pd.DataFrame, s1_side: pd.DataFrame, cand_side: pd.DataFrame) -> pd.DataFrame:
+    """Hydrate a pairs frame with both sides' prepped columns.
+
+    ``pairs`` needs source1_entity_id and cand_id. Feed this one chunk at a time:
+    the token-list columns make a fully-hydrated 100M-row pair frame far larger
+    than memory.
+    """
+    return pairs.join(s1_side, on="source1_entity_id").join(cand_side, on="cand_id")

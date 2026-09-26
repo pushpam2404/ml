@@ -16,6 +16,7 @@ import pandas as pd
 
 TOP_K = 30
 FALLBACK_TOP_K = 15
+S1_CHUNK_ROWS = 50_000  # S1 rows per join batch; bounds the merge intermediate
 MAX_TOKEN_DF = 3000  # drop tokens shared by more than this many candidates in a country.
                       # Calibrated against real data: median token doc-freq is 1, but a
                       # long tail of un-normalized suffix typos (e.g. "limittedd" at
@@ -65,11 +66,63 @@ def _candidates_from_index(s1_long: pd.DataFrame, cand_index: pd.DataFrame, top_
         .rename("overlap")
         .reset_index()
     )
-    overlap = overlap.sort_values("overlap", ascending=False)
+    # Deterministic tie-break on cand_id: scores tie often at the top-K boundary, and
+    # without a total order the surviving candidates would depend on row order -- which
+    # would make results vary with chunk size and the run non-reproducible.
+    overlap = overlap.sort_values(
+        ["overlap", "cand_id"], ascending=[False, True], kind="stable"
+    )
     return overlap.groupby("source1_entity_id", sort=False).head(top_k)
 
 
-def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str) -> pd.DataFrame:
+def _s1_long(s1: pd.DataFrame, fields=("name", "addr", "pin")) -> pd.DataFrame:
+    """Build the long (country, token, source1_entity_id) frame for the S1 side."""
+    parts = []
+    if "name" in fields:
+        parts.append(
+            _token_index(s1, "source1_entity_id", "name_toks").rename(
+                columns={"cand_id": "source1_entity_id"}
+            )
+        )
+    if "addr" in fields:
+        parts.append(
+            _token_index(s1, "source1_entity_id", "addr_toks").rename(
+                columns={"cand_id": "source1_entity_id"}
+            )
+        )
+    if "pin" in fields:
+        parts.append(
+            s1.loc[s1["pin"] != "", ["country", "pin", "source1_entity_id"]].rename(
+                columns={"pin": "token"}
+            )
+        )
+    return pd.concat(parts, ignore_index=True)
+
+
+def _block_chunked(s1: pd.DataFrame, index: pd.DataFrame, top_k: int, fields,
+                   chunk_rows: int = S1_CHUNK_ROWS, label: str = "") -> pd.DataFrame:
+    """Run the token join in S1 row-chunks.
+
+    The join's intermediate scales with the number of S1 rows fed in, so a
+    single-shot merge over millions of S1 rows would materialise billions of rows
+    before top-K ever trims it. Chunking bounds peak memory: the candidate index
+    is built once by the caller, and only the already-capped per-chunk results are
+    accumulated.
+    """
+    out = []
+    n_chunks = max(1, -(-len(s1) // chunk_rows))
+    for i, start in enumerate(range(0, len(s1), chunk_rows), 1):
+        chunk = s1.iloc[start:start + chunk_rows]
+        out.append(_candidates_from_index(_s1_long(chunk, fields), index, top_k))
+        if n_chunks > 1:
+            print(f"    [block{label}] chunk {i}/{n_chunks}", flush=True)
+    if not out:
+        return pd.DataFrame(columns=["source1_entity_id", "cand_id", "overlap"])
+    return pd.concat(out, ignore_index=True)
+
+
+def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str,
+                     chunk_rows: int = S1_CHUNK_ROWS) -> pd.DataFrame:
     """Return top-K candidates per S1 from a single candidate source (S2 or S3)."""
     n_by_country = cand.groupby("country", sort=False).size()
     name_idx = _weighted_index(_token_index(cand, "entity_id", "name_toks"), n_by_country)
@@ -79,33 +132,32 @@ def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str) ->
     )
     pin_idx = _weighted_index(raw_pin_idx, n_by_country)
     full_index = pd.concat([name_idx, addr_idx, pin_idx], ignore_index=True)
+    del name_idx, pin_idx, raw_pin_idx
 
-    s1_name = _token_index(s1, "source1_entity_id", "name_toks").rename(columns={"cand_id": "source1_entity_id"})
-    s1_addr = _token_index(s1, "source1_entity_id", "addr_toks").rename(columns={"cand_id": "source1_entity_id"})
-    s1_pin = s1.loc[s1["pin"] != "", ["country", "pin", "source1_entity_id"]].rename(columns={"pin": "token"})
-    s1_long = pd.concat([s1_name, s1_addr, s1_pin], ignore_index=True)
+    result = _block_chunked(
+        s1, full_index, TOP_K, ("name", "addr", "pin"), chunk_rows, f" {source_label}"
+    )
+    del full_index
 
-    result = _candidates_from_index(s1_long, full_index, TOP_K)
-
-    # Fallback: S1 ids with zero candidates so far get a relaxed city/state-token pass.
+    # Fallback: S1 ids with zero candidates so far get a relaxed address-only pass.
     covered = set(result["source1_entity_id"].unique())
     uncovered_s1 = s1.loc[~s1["source1_entity_id"].isin(covered)]
     if not uncovered_s1.empty:
-        # relaxed key: any address token (already includes city/state words), no name requirement
-        relaxed_s1_long = _token_index(uncovered_s1, "source1_entity_id", "addr_toks").rename(
-            columns={"cand_id": "source1_entity_id"}
+        relaxed = _block_chunked(
+            uncovered_s1, addr_idx, FALLBACK_TOP_K, ("addr",), chunk_rows,
+            f" {source_label}-fallback",
         )
-        relaxed = _candidates_from_index(relaxed_s1_long, addr_idx, FALLBACK_TOP_K)
         result = pd.concat([result, relaxed], ignore_index=True)
 
     result["source"] = source_label
     return result[["source1_entity_id", "cand_id", "source", "overlap"]]
 
 
-def generate_candidates(s1: pd.DataFrame, s2: pd.DataFrame, s3: pd.DataFrame) -> pd.DataFrame:
+def generate_candidates(s1: pd.DataFrame, s2: pd.DataFrame, s3: pd.DataFrame,
+                        chunk_rows: int = S1_CHUNK_ROWS) -> pd.DataFrame:
     """Full candidate generation: block against S2 and S3 independently, concat."""
-    cand2 = block_one_source(s1, s2, "S2")
-    cand3 = block_one_source(s1, s3, "S3")
+    cand2 = block_one_source(s1, s2, "S2", chunk_rows)
+    cand3 = block_one_source(s1, s3, "S3", chunk_rows)
     return pd.concat([cand2, cand3], ignore_index=True)
 
 
