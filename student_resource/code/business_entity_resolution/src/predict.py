@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from blocking import generate_candidates
 from data_io import load_source, build_side_lookups
 from score import predict_proba
+from selection import select_by_threshold, select_expected_f
 from write_outputs import write_id_list_tsv, pairs_to_id_map
 
 
@@ -55,9 +56,17 @@ def main():
 
     print("[predict] scoring candidates...")
     s1_side, cand_side = build_side_lookups(s1, s2, s3)
-    prob = predict_proba(booster, pairs, s1_side, cand_side, feature_cols)
+    pairs = pairs.copy()
+    pairs["prob"] = predict_proba(booster, pairs, s1_side, cand_side, feature_cols)
 
-    kept = pairs.loc[prob >= threshold]
+    # Apply the same rule training measured as best, via the same code path.
+    rule = meta.get("selection_rule", "threshold")
+    if rule == "expected_f":
+        kept = select_expected_f(pairs)
+    else:
+        kept = select_by_threshold(pairs, threshold)
+    print(f"[predict] selection rule: {rule} -> {len(kept)} matches kept "
+          f"of {len(pairs)} candidates")
     match_id_map = pairs_to_id_map(kept)
     write_id_list_tsv(
         os.path.join(args.output_dir, "matching_results.tsv"),

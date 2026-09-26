@@ -25,6 +25,7 @@ from data_io import load_source, build_side_lookups
 from evaluate import macro_f_beta
 from features import FEATURE_COLS
 from score import build_features
+from selection import select_by_threshold, select_expected_f
 
 
 def load_ground_truth(path: str) -> dict:
@@ -131,20 +132,45 @@ def main():
     # required val S1 ids = ALL true S1 ids in val split (includes zero-candidate singletons)
     val_truth = {k: v for k, v in sampled_truth.items() if k in val_ids}
 
-    best_t, best_score = 0.5, -1.0
+    # Persist the validation scores so the selection rule can be re-tuned offline in
+    # seconds instead of repeating this whole run.
+    val_pairs[["source1_entity_id", "cand_id", "prob", "label"]].to_parquet(
+        os.path.join(args.model_out, "val_predictions.parquet"), index=False
+    )
+
+    def score_of(kept):
+        return macro_f_beta(
+            kept.groupby("source1_entity_id")["cand_id"].apply(set).to_dict(), val_truth
+        )
+
+    # Rule A: one global probability threshold, grid-searched.
+    best_t, thresh_score = 0.5, -1.0
     for t in np.arange(0.05, 0.96, 0.05):
-        kept = val_pairs.loc[val_pairs["prob"] >= t]
-        pred_map = kept.groupby("source1_entity_id")["cand_id"].apply(set).to_dict()
-        score = macro_f_beta(pred_map, val_truth)
-        if score > best_score:
-            best_score, best_t = score, float(t)
-    print(f"[train] best threshold={best_t:.2f} val macro F0.5={best_score:.4f}")
+        score = score_of(select_by_threshold(val_pairs, float(t)))
+        if score > thresh_score:
+            thresh_score, best_t = score, float(t)
+    print(f"[train] global threshold={best_t:.2f} val macro F0.5={thresh_score:.4f}")
+
+    # Rule B: per-entity expected-F_0.5 prefix (adapts to how many plausible matches
+    # an entity has, and can choose to predict nothing at all).
+    expected_f_score = score_of(select_expected_f(val_pairs))
+    print(f"[train] per-entity expected-F   val macro F0.5={expected_f_score:.4f}")
+
+    # Pick whichever actually measures better, rather than assuming.
+    if expected_f_score > thresh_score:
+        rule, best_score = "expected_f", expected_f_score
+    else:
+        rule, best_score = "threshold", thresh_score
+    print(f"[train] selection rule chosen: {rule} (val macro F0.5={best_score:.4f})")
 
     booster.save_model(os.path.join(args.model_out, "model.json"))
     meta = {
         "feature_cols": FEATURE_COLS,
+        "selection_rule": rule,
         "threshold": best_t,
         "val_macro_f0_5": best_score,
+        "val_macro_f0_5_threshold_rule": thresh_score,
+        "val_macro_f0_5_expected_f_rule": expected_f_score,
         "blocking_recall_ceiling": recall_ceiling,
         "n_train_pairs": int(len(train_pairs)),
         "n_val_pairs": int(len(val_pairs)),
