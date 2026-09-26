@@ -211,6 +211,13 @@ def generate_candidates(s1: pd.DataFrame, s2: pd.DataFrame, s3: pd.DataFrame,
 def demo():
     from normalize import prep_source
 
+    # MIN_PAIR_SCORE is calibrated against the real corpus, where idf = log1p(n_docs/df)
+    # is large because n_docs is in the millions. On a toy corpus every score is ~1, so
+    # the production threshold would reject everything -- scale-dependence is a known
+    # limitation of an absolute cutoff. Exercise the blocking mechanics without it.
+    global MIN_PAIR_SCORE
+    saved, MIN_PAIR_SCORE = MIN_PAIR_SCORE, 0.0
+
     s1 = prep_source(pd.DataFrame({
         "entity_id": ["S1-1", "S1-2"],
         "business_name": ["Iris Brothers Pvt Ltd", "Lonely Business"],
@@ -235,6 +242,16 @@ def demo():
     got = set(cands.loc[cands["source1_entity_id"] == "S1-1", "cand_id"])
     assert "S2-1" in got, got
     assert "S2-2" not in got, got
+
+    # chunking must not change which candidates survive
+    one_shot = generate_candidates(s1, s2, s3, chunk_rows=10**9)
+    chunked = generate_candidates(s1, s2, s3, chunk_rows=1)
+    key = ["source1_entity_id", "cand_id"]
+    assert (one_shot.sort_values(key)[key].reset_index(drop=True)
+            .equals(chunked.sort_values(key)[key].reset_index(drop=True))), \
+        "chunking changed the candidate set"
+
+    MIN_PAIR_SCORE = saved
     print("blocking.py demo OK")
 
 
