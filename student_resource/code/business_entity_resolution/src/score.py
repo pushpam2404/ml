@@ -9,7 +9,7 @@ import pandas as pd
 from data_io import attach_pair_columns
 from features import build_pair_features
 
-PAIR_CHUNK_ROWS = 2_000_000
+PAIR_CHUNK_ROWS = 1_000_000
 
 
 def iter_pair_features(pairs: pd.DataFrame, s1_side: pd.DataFrame, cand_side: pd.DataFrame,

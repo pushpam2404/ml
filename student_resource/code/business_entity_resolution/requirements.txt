@@ -6,3 +6,4 @@ scikit-learn==1.9.1
 scipy==1.18.1
 Unidecode==1.4.0
 xgboost==3.4.1
+jellyfish==1.0.0

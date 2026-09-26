@@ -8,6 +8,8 @@ batch scoring where possible.
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz
+from rapidfuzz.distance import Levenshtein, JaroWinkler
+import jellyfish
 
 from normalize import addr_tokens, name_tokens
 
@@ -16,6 +18,13 @@ FEATURE_COLS = [
     "name_partial_ratio", "name_len_diff",
     "addr_jaccard", "addr_ratio", "pin_match", "house_match",
     "addr_empty_either",
+    # New features:
+    "name_jaro_winkler", "name_levenshtein",
+    "addr_token_sort_ratio", "addr_partial_ratio",
+    "name_token_set_ratio", "name_overlap_coeff",
+    "addr_jaro_winkler", "addr_trigram_jaccard",
+    "name_len_ratio", "pin_and_addr_present",
+    "name_phonetic_match",
 ]
 
 
@@ -84,6 +93,78 @@ def build_pair_features(pairs: pd.DataFrame) -> pd.DataFrame:
     out["addr_empty_either"] = (
         (pairs["addr_norm_1"] == "") | (pairs["addr_norm_2"] == "")
     ).astype(float)
+
+    # --- NEW FEATURES ---
+    # Jaro-Winkler: especially good for short strings and prefix matches
+    out["name_jaro_winkler"] = [
+        JaroWinkler.similarity(a, b)
+        for a, b in zip(pairs["name_norm_1"], pairs["name_norm_2"])
+    ]
+
+    # Normalized Levenshtein distance (0=identical, 1=completely different)
+    out["name_levenshtein"] = [
+        Levenshtein.normalized_distance(a, b)
+        for a, b in zip(pairs["name_norm_1"], pairs["name_norm_2"])
+    ]
+
+    # Address token sort ratio (handles word reordering in addresses)
+    out["addr_token_sort_ratio"] = [
+        fuzz.token_sort_ratio(a, b) / 100.0
+        for a, b in zip(pairs["addr_norm_1"], pairs["addr_norm_2"])
+    ]
+
+    # Address partial ratio (handles substring matches in addresses)
+    out["addr_partial_ratio"] = [
+        fuzz.partial_ratio(a, b) / 100.0
+        for a, b in zip(pairs["addr_norm_1"], pairs["addr_norm_2"])
+    ]
+
+    # Name token set ratio (different from token_sort — handles both reordering AND partial overlap)
+    out["name_token_set_ratio"] = [
+        fuzz.token_set_ratio(a, b) / 100.0
+        for a, b in zip(pairs["name_norm_1"], pairs["name_norm_2"])
+    ]
+
+    # Overlap coefficient (like Jaccard but asymmetric - good for substring business names)
+    def overlap_coeff(a, b):
+        sa, sb = set(a), set(b)
+        if not sa or not sb:
+            return 0.0
+        return len(sa & sb) / min(len(sa), len(sb))
+
+    out["name_overlap_coeff"] = [
+        overlap_coeff(a, b) for a, b in zip(name_toks_1, name_toks_2)
+    ]
+
+    # Address Jaro-Winkler
+    out["addr_jaro_winkler"] = [
+        JaroWinkler.similarity(a, b)
+        for a, b in zip(pairs["addr_norm_1"], pairs["addr_norm_2"])
+    ]
+
+    # Character trigram Jaccard on address (catches address typos)
+    out["addr_trigram_jaccard"] = [
+        _jaccard(list(_trigrams(a)), list(_trigrams(b)))
+        for a, b in zip(pairs["addr_norm_1"], pairs["addr_norm_2"])
+    ]
+
+    # Name length ratio (normalized) - very short vs very long name is suspicious
+    out["name_len_ratio"] = [
+        min(len(a), len(b)) / max(len(a), len(b)) if max(len(a), len(b)) > 0 else 1.0
+        for a, b in zip(pairs["name_norm_1"], pairs["name_norm_2"])
+    ]
+
+    # Both addresses non-empty AND matching PIN (strong combined signal)
+    out["pin_and_addr_present"] = (
+        (pairs["pin_1"] != "") & (pairs["pin_1"] == pairs["pin_2"]) &
+        (pairs["addr_norm_1"] != "") & (pairs["addr_norm_2"] != "")
+    ).astype(float)
+
+    out["name_phonetic_match"] = [
+        int(jellyfish.metaphone(a) == jellyfish.metaphone(b))
+        if a and b else 0
+        for a, b in zip(pairs["name_norm_1"], pairs["name_norm_2"])
+    ]
 
     return out[FEATURE_COLS]
 

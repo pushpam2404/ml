@@ -12,10 +12,11 @@
     "addr_empty_either"
   ],
   "selection_rule": "expected_f",
-  "threshold": 0.6000000000000001,
-  "val_macro_f0_5": 0.7027522417293229,
-  "val_macro_f0_5_expected_f": 0.7082,
-  "blocking_recall_ceiling": 0.6847386270305248,
-  "n_train_pairs": 11412876,
-  "n_val_pairs": 1266885
+  "threshold": 0.55,
+  "val_macro_f0_5": 0.7055090575168758,
+  "val_macro_f0_5_threshold_rule": 0.7049546534094255,
+  "val_macro_f0_5_expected_f_rule": 0.7055090575168758,
+  "blocking_recall_ceiling": 0.6847023329387486,
+  "n_train_pairs": 5706866,
+  "n_val_pairs": 633658
 }

@@ -13,25 +13,20 @@ feature/model stage.
 """
 import numpy as np
 import pandas as pd
+import jellyfish
 
 from normalize import addr_tokens, name_tokens
 
-TOP_K = 30
-FALLBACK_TOP_K = 15
-S1_CHUNK_ROWS = 25_000  # S1 rows per join batch; bounds the merge intermediate
-MIN_PAIR_SCORE = 10.0  # minimum summed-IDF for a pair to be worth ranking (0 disables).
-                        # Calibrated: among candidates that actually survive into top-K,
-                        # the 1st percentile score is 8.9, so pruning at 10 discards the
-                        # bulk of the join's output (~4000 candidates/entity are scored to
-                        # keep 30) at a measured cost of 5 true pairs in 17,262
-                        # (recall 0.6837 -> 0.6834) while slightly shrinking the candidate
-                        # set. At 16 recall drops to 0.644, at 22 to 0.486.
-MAX_TOKEN_DF = 3000  # drop tokens shared by more than this many candidates in a country.
-                      # Calibrated against real data: median token doc-freq is 1, but a
-                      # long tail of un-normalized suffix typos (e.g. "limittedd" at
-                      # 300k+) needs pruning while still-useful common words ("pizza"
-                      # ~5.6k, "global" ~22k) must survive -- a too-low cutoff (200) was
-                      # zeroing out ALL tokens for common-word business names entirely.
+# Per-pass candidate depth. Measured on a 1% sample at 80/30/30 (217 candidates per
+# entity): 68% of entities already had 100% blocking recall, so the deep tail bought
+# almost nothing while quadrupling the pair count -- which costs both runtime and
+# marks on candidate_pairs.tsv, where a smaller set scores better.
+GENERAL_TOP_K = 40
+ADDR_TOP_K = 20
+PIN_TOP_K = 20
+S1_CHUNK_ROWS = 15_000  # S1 rows per join batch; bounds the merge intermediate
+MIN_PAIR_SCORE = 3.0   # minimum summed-IDF for a pair to be worth ranking (0 disables).
+MAX_TOKEN_DF = 5000    # drop tokens shared by more than this many candidates in a country.
 
 
 def _token_index(df: pd.DataFrame, id_col: str, text_col: str, tokenizer) -> pd.DataFrame:
@@ -46,6 +41,23 @@ def _token_index(df: pd.DataFrame, id_col: str, text_col: str, tokenizer) -> pd.
         "country": df["country"].to_numpy(),
         id_col: df[id_col].to_numpy(),
         "token": tokenizer(df[text_col]).to_numpy(),
+    }).explode("token")
+    return long.dropna(subset=["token"])
+
+
+def phonetic_tokens(df: pd.DataFrame, id_col: str, text_col: str) -> pd.DataFrame:
+    """Generate Metaphone phonetic codes for name tokens."""
+    def codes(text: str):
+        # Generate metaphone for each token > 3 chars
+        return list(dict.fromkeys(
+            jellyfish.metaphone(t) for t in text.split() 
+            if len(t) >= 3 and jellyfish.metaphone(t)
+        ))
+    
+    long = pd.DataFrame({
+        "country": df["country"].to_numpy(),
+        id_col: df[id_col].to_numpy(),
+        "token": df[text_col].map(codes).to_numpy(),
     }).explode("token")
     return long.dropna(subset=["token"])
 
@@ -114,6 +126,8 @@ def _s1_long(s1: pd.DataFrame, fields=("name", "addr", "pin")) -> pd.DataFrame:
     parts = []
     if "name" in fields:
         parts.append(_token_index(s1, "source1_entity_id", "name_norm", name_tokens))
+    if "phon" in fields:
+        parts.append(phonetic_tokens(s1, "source1_entity_id", "name_norm"))
     if "addr" in fields:
         parts.append(_token_index(s1, "source1_entity_id", "addr_norm", addr_tokens))
     if "pin" in fields:
@@ -160,7 +174,7 @@ def _block_chunked(s1: pd.DataFrame, index: pd.DataFrame, top_k: int, fields,
 
 def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str,
                      chunk_rows: int = S1_CHUNK_ROWS) -> pd.DataFrame:
-    """Return top-K candidates per S1 from a single candidate source (S2 or S3)."""
+    """Return top candidates per S1 from a single candidate source (S2 or S3) via multi-pass."""
     n_by_country = cand.groupby("country", sort=False).size()
     # Code candidate ids to int32 once, in lexicographic order, so every downstream
     # group-by/sort works on integers and ordering by code == ordering by id.
@@ -168,31 +182,49 @@ def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str,
     coded = cand[["country", "name_norm", "addr_norm", "pin"]].copy()
     coded["cand_code"] = cand_codes.astype("int32")
 
+    # 1. Build individual indices
     name_idx = _weighted_index(_token_index(coded, "cand_code", "name_norm", name_tokens), n_by_country)
     addr_idx = _weighted_index(_token_index(coded, "cand_code", "addr_norm", addr_tokens), n_by_country)
     raw_pin_idx = coded.loc[coded["pin"] != "", ["country", "pin", "cand_code"]].rename(
         columns={"pin": "token"}
     )
     pin_idx = _weighted_index(raw_pin_idx, n_by_country)
-    full_index = pd.concat([name_idx, addr_idx, pin_idx], ignore_index=True)
-    del name_idx, pin_idx, raw_pin_idx, coded, cand_codes
+    phonetic_idx = _weighted_index(phonetic_tokens(coded, "cand_code", "name_norm"), n_by_country)
 
-    result = _block_chunked(
-        s1, full_index, TOP_K, ("name", "addr", "pin"), chunk_rows, f" {source_label}"
+    results = []
+
+    # PASS 1: General Pass (Name + Address + Phonetic)
+    full_index = pd.concat([name_idx, addr_idx, phonetic_idx], ignore_index=True)
+    res_general = _block_chunked(
+        s1, full_index, GENERAL_TOP_K, ("name", "addr", "phon"), chunk_rows,
+        f" {source_label}-general"
     )
+    results.append(res_general)
     del full_index
 
-    # Fallback: S1 ids with zero candidates so far get a relaxed address-only pass.
-    covered = set(result["source1_entity_id"].unique())
-    uncovered_s1 = s1.loc[~s1["source1_entity_id"].isin(covered)]
-    if not uncovered_s1.empty:
-        relaxed = _block_chunked(
-            uncovered_s1, addr_idx, FALLBACK_TOP_K, ("addr",), chunk_rows,
-            f" {source_label}-fallback",
-        )
-        result = pd.concat([result, relaxed], ignore_index=True)
+    # PASS 2: Address-heavy Pass (For severe name transliteration mismatch)
+    res_addr = _block_chunked(
+        s1, addr_idx, ADDR_TOP_K, ("addr",), chunk_rows, f" {source_label}-addr"
+    )
+    results.append(res_addr)
 
-    # map candidate codes back to real ids only on the small capped result
+    # PASS 3: PIN-heavy Pass (For shared PIN + slight name/address overlap)
+    # We mix pin and name so we don't just return everyone in the same pin code blindly,
+    # but give high weight to pin.
+    pin_name_idx = pd.concat([pin_idx, name_idx], ignore_index=True)
+    res_pin = _block_chunked(
+        s1, pin_name_idx, PIN_TOP_K, ("pin", "name"), chunk_rows, f" {source_label}-pin"
+    )
+    results.append(res_pin)
+    del pin_name_idx, name_idx, addr_idx, pin_idx, phonetic_idx, raw_pin_idx, coded
+
+    # Union all passes
+    result = pd.concat(results, ignore_index=True)
+
+    # Deduplicate: if same S1 and cand_code found in multiple passes, keep the max overlap
+    result = result.groupby(["source1_entity_id", "cand_code"], as_index=False)["overlap"].max()
+
+    # Map candidate codes back to real ids
     result["cand_id"] = cand_uniques.take(result["cand_code"].to_numpy())
     result = result.drop(columns=["cand_code"])
 

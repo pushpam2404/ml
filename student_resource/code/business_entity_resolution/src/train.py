@@ -114,16 +114,18 @@ def main():
     params = {
         "objective": "binary:logistic",
         "eval_metric": "aucpr",
-        "max_depth": 5,
-        "eta": 0.1,
+        "max_depth": 7,
+        "eta": 0.05,
         "subsample": 0.8,
-        "colsample_bytree": 0.8,
+        "colsample_bytree": 0.7,
+        "min_child_weight": 5,
+        "gamma": 0.1,
         "seed": args.seed,
     }
     booster = xgb.train(
-        params, dtrain, num_boost_round=300,
+        params, dtrain, num_boost_round=600,
         evals=[(dtrain, "train"), (dval, "val")],
-        early_stopping_rounds=20, verbose_eval=50,
+        early_stopping_rounds=30, verbose_eval=50,
     )
 
     val_pairs = val_pairs.copy()

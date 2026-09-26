@@ -18,6 +18,13 @@ _SYNONYMS = {
     "corporation": "corp", "incorporated": "inc", "limited": "ltd",
     "private": "pvt", "llp": "llp", "llc": "llc", "company": "co",
     "and": "and", "&": "and",
+    # French legal suffixes (15% of test set is France)
+    "sarl": "sarl", "sas": "sas", "eurl": "eurl", "sasu": "sasu",
+    "sci": "sci", "snc": "snc", "sa": "sa",
+    "societe": "soc", "société": "soc", "cie": "co",
+    "groupe": "grp", "holding": "hldg",
+    "fils": "fils", "freres": "freres", "frères": "freres",
+    "associes": "assoc", "associés": "assoc",
 }
 
 # address abbreviation -> canonical token
@@ -25,6 +32,10 @@ _ADDR_SYNONYMS = {
     "road": "rd", "street": "st", "avenue": "ave", "boulevard": "blvd",
     "drive": "dr", "lane": "ln", "court": "ct", "circle": "cir",
     "apartment": "apt", "unit": "unit", "suite": "ste",
+    # French address terms
+    "rue": "rue", "allée": "allee", "allee": "allee",
+    "chemin": "chemin", "impasse": "impasse", "place": "place",
+    "passage": "passage", "quartier": "quartier",
 }
 
 _PUNCT_RE = re.compile(r"[^a-z0-9\s]")
@@ -72,7 +83,7 @@ def name_tokens(name_norm: pd.Series, min_len: int = 3) -> pd.Series:
     and de-duplicating here is free, whereas de-duplicating the exploded index later
     costs a hash over tens of millions of rows.
     """
-    stop = set(_SYNONYMS.values()) | {"the", "of", "for"}
+    stop = set(_SYNONYMS.values()) | {"the", "of", "for", "de", "du", "des", "le", "la", "les", "et"}
 
     def toks(text: str):
         return list(dict.fromkeys(
