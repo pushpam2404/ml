@@ -7,6 +7,12 @@ import re
 import pandas as pd
 from unidecode import unidecode
 
+# pandas 3's default Arrow-backed "str" dtype makes the python-level string
+# ops used throughout this pipeline (.map, zip, set-building over millions of
+# rows) 10-100x slower -- every element access pays a PyArrow-scalar
+# conversion. Force the classic numpy-object string dtype everywhere.
+pd.set_option("future.infer_string", False)
+
 # legal-suffix / common-word synonyms folded to one canonical token
 _SYNONYMS = {
     "corporation": "corp", "incorporated": "inc", "limited": "ltd",

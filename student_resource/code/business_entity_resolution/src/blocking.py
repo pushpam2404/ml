@@ -11,12 +11,17 @@ per (S1, candidate) pair, already capped to top-K per S1 per source. This is
 exactly the candidate set later written to candidate_pairs.tsv and fed to the
 feature/model stage.
 """
+import numpy as np
 import pandas as pd
 
 TOP_K = 30
-FALLBACK_TOP_K = 5
-MAX_TOKEN_DF = 200  # drop tokens shared by more than this many candidates in a country
-                     # (e.g. "mumbai", "main") -- otherwise the merge fans out to O(n^2)
+FALLBACK_TOP_K = 15
+MAX_TOKEN_DF = 3000  # drop tokens shared by more than this many candidates in a country.
+                      # Calibrated against real data: median token doc-freq is 1, but a
+                      # long tail of un-normalized suffix typos (e.g. "limittedd" at
+                      # 300k+) needs pruning while still-useful common words ("pizza"
+                      # ~5.6k, "global" ~22k) must survive -- a too-low cutoff (200) was
+                      # zeroing out ALL tokens for common-word business names entirely.
 
 
 def _token_index(df: pd.DataFrame, id_col: str, tok_col: str) -> pd.DataFrame:
@@ -26,24 +31,37 @@ def _token_index(df: pd.DataFrame, id_col: str, tok_col: str) -> pd.DataFrame:
     return long.dropna(subset=["token"])
 
 
-def _prune_common_tokens(index: pd.DataFrame, max_df: int = MAX_TOKEN_DF) -> pd.DataFrame:
-    """Drop (country, token) keys that index more candidates than max_df.
+def _weighted_index(index: pd.DataFrame, n_by_country: pd.Series,
+                    max_df: int = MAX_TOKEN_DF) -> pd.DataFrame:
+    """Prune over-common (country, token) keys and attach an IDF weight to the rest.
 
-    Overly common tokens (city names, "main", ...) are useless for blocking and
-    make the join blow up on 5-10M row sources -- prune them before the merge.
+    Two jobs from one doc-frequency pass:
+    * pruning -- a token indexing more than max_df candidates would fan the join
+      out intractably (and carries almost no signal anyway),
+    * weighting -- a shared rare token ("vendome") is far stronger evidence than a
+      shared common one ("global"), so candidates are ranked by summed IDF rather
+      than by a raw count of shared tokens that treats both alike.
+
+    Each field (name / address / PIN) is weighted independently, so a token that is
+    common in addresses but rare in names gets the right weight in each.
     """
-    doc_freq = index.groupby(["country", "token"], sort=False)["cand_id"].transform("size")
-    return index.loc[doc_freq <= max_df]
+    index = index.drop_duplicates(["country", "token", "cand_id"]).reset_index(drop=True)
+    doc_freq = index.groupby(["country", "token"], sort=False)["cand_id"].transform("size").to_numpy()
+    keep = doc_freq <= max_df
+    index = index.loc[keep].copy()
+    n_docs = index["country"].map(n_by_country).to_numpy(dtype="float64")
+    index["idf"] = np.log1p(n_docs / doc_freq[keep])
+    return index
 
 
 def _candidates_from_index(s1_long: pd.DataFrame, cand_index: pd.DataFrame, top_k: int) -> pd.DataFrame:
-    """Join S1 tokens to the candidate index on (country, token), tally overlap, keep top_k."""
+    """Join S1 tokens to the candidate index on (country, token), sum IDF, keep top_k."""
     merged = s1_long.merge(cand_index, on=["country", "token"], how="inner")
     if merged.empty:
-        return merged.assign(overlap=pd.Series(dtype=int))
+        return merged.reindex(columns=["source1_entity_id", "cand_id", "overlap"])
     overlap = (
-        merged.groupby(["source1_entity_id", "cand_id"], sort=False)
-        .size()
+        merged.groupby(["source1_entity_id", "cand_id"], sort=False)["idf"]
+        .sum()
         .rename("overlap")
         .reset_index()
     )
@@ -53,11 +71,13 @@ def _candidates_from_index(s1_long: pd.DataFrame, cand_index: pd.DataFrame, top_
 
 def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str) -> pd.DataFrame:
     """Return top-K candidates per S1 from a single candidate source (S2 or S3)."""
-    name_idx = _prune_common_tokens(_token_index(cand, "entity_id", "name_toks"))
-    addr_idx = _prune_common_tokens(_token_index(cand, "entity_id", "addr_toks"))
-    pin_idx = cand.loc[cand["pin"] != "", ["country", "pin", "entity_id"]].rename(
+    n_by_country = cand.groupby("country", sort=False).size()
+    name_idx = _weighted_index(_token_index(cand, "entity_id", "name_toks"), n_by_country)
+    addr_idx = _weighted_index(_token_index(cand, "entity_id", "addr_toks"), n_by_country)
+    raw_pin_idx = cand.loc[cand["pin"] != "", ["country", "pin", "entity_id"]].rename(
         columns={"pin": "token", "entity_id": "cand_id"}
-    )  # PIN codes are naturally low-cardinality; no pruning needed
+    )
+    pin_idx = _weighted_index(raw_pin_idx, n_by_country)
     full_index = pd.concat([name_idx, addr_idx, pin_idx], ignore_index=True)
 
     s1_name = _token_index(s1, "source1_entity_id", "name_toks").rename(columns={"cand_id": "source1_entity_id"})

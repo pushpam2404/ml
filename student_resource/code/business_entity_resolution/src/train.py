@@ -66,7 +66,8 @@ def main():
     print(f"[train] {len(pairs)} candidate pairs for {s1['source1_entity_id'].nunique()} S1 rows")
 
     # --- recall ceiling: what fraction of ground-truth matches survived blocking ---
-    sampled_truth = {k: v for k, v in truth.items() if k in set(s1["source1_entity_id"])}
+    s1_id_set = set(s1["source1_entity_id"])
+    sampled_truth = {k: v for k, v in truth.items() if k in s1_id_set}
     total_true = sum(len(v) for v in sampled_truth.values())
     cand_by_s1 = pairs.groupby("source1_entity_id")["cand_id"].apply(set)
     recovered = sum(
