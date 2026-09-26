@@ -19,6 +19,13 @@ from normalize import addr_tokens, name_tokens
 TOP_K = 30
 FALLBACK_TOP_K = 15
 S1_CHUNK_ROWS = 25_000  # S1 rows per join batch; bounds the merge intermediate
+MIN_PAIR_SCORE = 10.0  # minimum summed-IDF for a pair to be worth ranking (0 disables).
+                        # Calibrated: among candidates that actually survive into top-K,
+                        # the 1st percentile score is 8.9, so pruning at 10 discards the
+                        # bulk of the join's output (~4000 candidates/entity are scored to
+                        # keep 30) at a measured cost of 5 true pairs in 17,262
+                        # (recall 0.6837 -> 0.6834) while slightly shrinking the candidate
+                        # set. At 16 recall drops to 0.644, at 22 to 0.486.
 MAX_TOKEN_DF = 3000  # drop tokens shared by more than this many candidates in a country.
                       # Calibrated against real data: median token doc-freq is 1, but a
                       # long tail of un-normalized suffix typos (e.g. "limittedd" at
@@ -84,6 +91,15 @@ def _candidates_from_index(s1_long: pd.DataFrame, cand_index: pd.DataFrame, top_
         .rename("overlap")
         .reset_index()
     )
+    # Drop pairs too weak to reach top-K before sorting. The join yields ~4000
+    # candidates per entity of which 30 are kept, and the bulk are pairs sharing a
+    # single common (low-IDF) token. Filtering on the SCORE rather than on a count of
+    # shared tokens is what makes this safe: a pair sharing one *rare* token scores
+    # high and survives, while one sharing a single common token does not.
+    if MIN_PAIR_SCORE > 0:
+        overlap = overlap.loc[overlap["overlap"].to_numpy() >= MIN_PAIR_SCORE]
+        if overlap.empty:
+            return overlap.reindex(columns=["s1_code", "cand_code", "overlap"])
     # Deterministic tie-break: scores tie often at the top-K boundary, and without a
     # total order the survivors would depend on row order -- results would vary with
     # chunk size and the run would not be reproducible.
