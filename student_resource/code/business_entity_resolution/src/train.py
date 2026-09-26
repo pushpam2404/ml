@@ -75,7 +75,12 @@ def main():
         len(v & cand_by_s1.get(k, set())) for k, v in sampled_truth.items()
     )
     recall_ceiling = recovered / total_true if total_true else 1.0
+    n_zero_cand = len(s1_id_set) - cand_by_s1.index.nunique()
+    cand_sizes = cand_by_s1.map(len)
     print(f"[train] blocking recall ceiling: {recovered}/{total_true} = {recall_ceiling:.4f}")
+    print(f"[train] candidates/entity: mean={len(pairs)/len(s1_id_set):.1f} "
+          f"median={cand_sizes.median():.0f} max={cand_sizes.max()}; "
+          f"{n_zero_cand} entities got zero candidates")
 
     print("[train] attaching features...")
     s1_side, cand_side = build_side_lookups(s1, s2, s3)
@@ -90,7 +95,11 @@ def main():
     ]
 
     # --- split by S1 id, not by row, to avoid leakage ---
-    unique_s1 = pairs["source1_entity_id"].unique()
+    # Split over EVERY sampled S1 entity, not just those that got candidates: an
+    # entity blocking found nothing for still gets scored by the metric (1.0 if it
+    # truly has no matches, 0.0 otherwise). Drawing the split from `pairs` would
+    # silently exclude them and bias both the threshold and the reported F0.5.
+    unique_s1 = np.array(sorted(s1_id_set), dtype=object)
     rng.shuffle(unique_s1)
     n_val = max(1, int(len(unique_s1) * args.val_frac))
     val_ids = set(unique_s1[:n_val])

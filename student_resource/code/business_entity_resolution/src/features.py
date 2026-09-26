@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz
 
+from normalize import addr_tokens, name_tokens
+
 FEATURE_COLS = [
     "name_jaccard", "name_trigram_jaccard", "name_token_sort_ratio",
     "name_partial_ratio", "name_len_diff",
@@ -34,11 +36,21 @@ def _trigrams(s: str) -> set:
 
 
 def build_pair_features(pairs: pd.DataFrame) -> pd.DataFrame:
-    """pairs must have *_1 (S1 side) and *_2 (candidate side) columns."""
+    """pairs must have *_1 (S1 side) and *_2 (candidate side) normalized columns.
+
+    Token lists are derived here from the normalized strings using the same
+    tokenizers blocking uses, rather than being carried on the pair frame -- list
+    columns joined onto a 100M-row pair set do not fit in memory.
+    """
     out = pd.DataFrame(index=pairs.index)
 
+    name_toks_1 = name_tokens(pairs["name_norm_1"])
+    name_toks_2 = name_tokens(pairs["name_norm_2"])
+    addr_toks_1 = addr_tokens(pairs["addr_norm_1"])
+    addr_toks_2 = addr_tokens(pairs["addr_norm_2"])
+
     out["name_jaccard"] = [
-        _jaccard(a, b) for a, b in zip(pairs["name_toks_1"], pairs["name_toks_2"])
+        _jaccard(a, b) for a, b in zip(name_toks_1, name_toks_2)
     ]
     out["name_trigram_jaccard"] = [
         _jaccard(list(_trigrams(a)), list(_trigrams(b)))
@@ -57,7 +69,7 @@ def build_pair_features(pairs: pd.DataFrame) -> pd.DataFrame:
     ).abs()
 
     out["addr_jaccard"] = [
-        _jaccard(a, b) for a, b in zip(pairs["addr_toks_1"], pairs["addr_toks_2"])
+        _jaccard(a, b) for a, b in zip(addr_toks_1, addr_toks_2)
     ]
     out["addr_ratio"] = [
         fuzz.ratio(a, b) / 100.0
@@ -78,12 +90,8 @@ def build_pair_features(pairs: pd.DataFrame) -> pd.DataFrame:
 
 def demo():
     pairs = pd.DataFrame({
-        "name_toks_1": [["iris", "brothers"], ["acme"]],
-        "name_toks_2": [["iris", "brothers"], ["zenith"]],
         "name_norm_1": ["iris brothers pvt ltd", "acme co"],
         "name_norm_2": ["iris brothers pvt ltd", "zenith co"],
-        "addr_toks_1": [["main", "springfield"], ["oak"]],
-        "addr_toks_2": [["main", "springfield"], ["pine"]],
         "addr_norm_1": ["123 main st springfield", "1 oak rd"],
         "addr_norm_2": ["123 main st springfield", "2 pine rd"],
         "pin_1": ["62701", ""],

@@ -2,7 +2,7 @@
 import pandas as pd
 from normalize import prep_source
 
-PREP_COLS = ["name_norm", "addr_norm", "pin", "house_no", "name_toks", "addr_toks"]
+PREP_COLS = ["name_norm", "addr_norm", "pin", "house_no"]
 
 
 def load_source(path: str) -> pd.DataFrame:

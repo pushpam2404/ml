@@ -14,9 +14,11 @@ feature/model stage.
 import numpy as np
 import pandas as pd
 
+from normalize import addr_tokens, name_tokens
+
 TOP_K = 30
 FALLBACK_TOP_K = 15
-S1_CHUNK_ROWS = 50_000  # S1 rows per join batch; bounds the merge intermediate
+S1_CHUNK_ROWS = 25_000  # S1 rows per join batch; bounds the merge intermediate
 MAX_TOKEN_DF = 3000  # drop tokens shared by more than this many candidates in a country.
                       # Calibrated against real data: median token doc-freq is 1, but a
                       # long tail of un-normalized suffix typos (e.g. "limittedd" at
@@ -25,10 +27,17 @@ MAX_TOKEN_DF = 3000  # drop tokens shared by more than this many candidates in a
                       # zeroing out ALL tokens for common-word business names entirely.
 
 
-def _token_index(df: pd.DataFrame, id_col: str, tok_col: str) -> pd.DataFrame:
-    """Explode a token-list column into long (country, token, id) rows."""
-    long = df[["country", id_col, tok_col]].explode(tok_col)
-    long = long.rename(columns={tok_col: "token", id_col: "cand_id"})
+def _token_index(df: pd.DataFrame, id_col: str, text_col: str, tokenizer) -> pd.DataFrame:
+    """Tokenize a normalized text column into long (country, token, id) rows.
+
+    Tokens are derived here rather than stored on the source frames -- the list
+    column costs ~1GB per source if kept, and is only ever needed transiently.
+    """
+    long = pd.DataFrame({
+        "country": df["country"].to_numpy(),
+        "cand_id": df[id_col].to_numpy(),
+        "token": tokenizer(df[text_col]).to_numpy(),
+    }).explode("token")
     return long.dropna(subset=["token"])
 
 
@@ -80,13 +89,13 @@ def _s1_long(s1: pd.DataFrame, fields=("name", "addr", "pin")) -> pd.DataFrame:
     parts = []
     if "name" in fields:
         parts.append(
-            _token_index(s1, "source1_entity_id", "name_toks").rename(
+            _token_index(s1, "source1_entity_id", "name_norm", name_tokens).rename(
                 columns={"cand_id": "source1_entity_id"}
             )
         )
     if "addr" in fields:
         parts.append(
-            _token_index(s1, "source1_entity_id", "addr_toks").rename(
+            _token_index(s1, "source1_entity_id", "addr_norm", addr_tokens).rename(
                 columns={"cand_id": "source1_entity_id"}
             )
         )
@@ -125,8 +134,8 @@ def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str,
                      chunk_rows: int = S1_CHUNK_ROWS) -> pd.DataFrame:
     """Return top-K candidates per S1 from a single candidate source (S2 or S3)."""
     n_by_country = cand.groupby("country", sort=False).size()
-    name_idx = _weighted_index(_token_index(cand, "entity_id", "name_toks"), n_by_country)
-    addr_idx = _weighted_index(_token_index(cand, "entity_id", "addr_toks"), n_by_country)
+    name_idx = _weighted_index(_token_index(cand, "entity_id", "name_norm", name_tokens), n_by_country)
+    addr_idx = _weighted_index(_token_index(cand, "entity_id", "addr_norm", addr_tokens), n_by_country)
     raw_pin_idx = cand.loc[cand["pin"] != "", ["country", "pin", "entity_id"]].rename(
         columns={"pin": "token", "entity_id": "cand_id"}
     )

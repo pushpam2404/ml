@@ -85,19 +85,24 @@ def addr_tokens(addr_norm: pd.Series, min_len: int = 3) -> pd.Series:
 
 
 def prep_source(df: pd.DataFrame) -> pd.DataFrame:
-    """Add normalized columns needed by blocking/features to a raw source dataframe."""
-    out = df.copy()
-    out["name_norm"] = normalize_names(out["business_name"])
-    out["addr_norm"] = normalize_addresses(out["business_address"])
-    out["pin"] = extract_pin(out["business_address"])
+    """Normalized columns for blocking/features, keeping only what is needed.
+
+    Deliberately compact: the raw name/address columns are dropped once normalized,
+    and token lists are NOT materialised -- they are derived on demand by
+    name_tokens()/addr_tokens(). Storing them costs ~1GB per source (a separate
+    python list object per row) and three sources then exceed available memory.
+    """
+    out = pd.DataFrame({"entity_id": df["entity_id"], "country": df["country"]})
+    out["name_norm"] = normalize_names(df["business_name"])
+    out["addr_norm"] = normalize_addresses(df["business_address"])
+    out["pin"] = extract_pin(df["business_address"])
     out["house_no"] = extract_house_number(out["addr_norm"])
-    out["name_toks"] = name_tokens(out["name_norm"])
-    out["addr_toks"] = addr_tokens(out["addr_norm"])
     return out
 
 
 def demo():
     df = pd.DataFrame({
+        "entity_id": ["S1-1", "S2-1", "S3-1"],
         "business_name": ["Iris Brothers Pvt Ltd", "IRIS BROTHERS PRIVATE LIMITED", "wilfordhancock.com"],
         "business_address": ["123 Main St, Springfield, IL 62701", "123 MAIN STREET, SPRINGFIELD, IL", ""],
         "country": ["India", "India", "US"],
@@ -106,7 +111,10 @@ def demo():
     assert out["name_norm"][0] == out["name_norm"][1] == "iris brothers pvt ltd"
     assert out["pin"][0] == "62701" and out["pin"][1] == ""
     assert out["house_no"][0] == "123" == out["house_no"][1]
-    assert "iris" in out["name_toks"][0] and "brothers" in out["name_toks"][0]
+    assert "business_name" not in out.columns, "raw columns must be dropped"
+    toks = name_tokens(out["name_norm"])
+    assert "iris" in toks[0] and "brothers" in toks[0]
+    assert "ltd" not in toks[0] and "pvt" not in toks[0], "legal suffixes are stopwords"
     print("normalize.py demo OK")
 
 
