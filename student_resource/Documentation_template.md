@@ -283,16 +283,17 @@ Summary of full-scale training and test evaluation:
 
 | Metric / Dimension | Value | Notes |
 | --- | --- | --- |
-| **Blocking Recall Ceiling (Train)** | **0.6847** (68.47%) | 522,737 of 763,411 true pairs recovered in top-K |
-| **Training Candidate Pairs** | 11,412,876 | 470,285 positive pairs (hard negative mining via blocking) |
-| **Validation Candidate Pairs** | 1,266,885 | 52,452 positive pairs across held-out Source-1 entity IDs |
-| **Validation AUCPR** | 0.9741 | Close agreement with train AUCPR (0.9750) confirming no overfitting |
-| **Optimal Classification Threshold** | **0.60** | Tuned via grid search directly on competition macro $F_{0.5}$ metric |
-| **Validation Macro $F_{0.5}$** | **0.7028** | Scored with exact competition formula including singletons |
+| **Blocking Recall Ceiling (Train)** | **0.8470** (84.70%) | 646,614 of 763,411 true pairs recovered; 10% S1 sample (220,682 entities) |
+| **Candidates per Entity (Train)** | 139.3 | median 140, max 190; **0 entities with zero candidates** |
+| **Training Candidate Pairs** | 27,672,269 | Hard negatives come from blocking itself, not random sampling |
+| **Validation Candidate Pairs** | 3,071,177 | Held-out by Source-1 entity id, including zero-candidate entities |
+| **Validation AUCPR** | 0.98563 | Train AUCPR 0.98743 -- a 0.0018 gap, so the model is not overfitting |
+| **Optimal Classification Threshold** | **0.65** | Grid-searched directly on the competition macro $F_{0.5}$ metric |
+| **Validation Macro $F_{0.5}$** | **0.8512** | Competition formula including singletons; per-entity expected-F rule scored 0.8510, so the global threshold was kept |
 | **Test Source-1 Entities** | 1,732,544 | Full test set evaluated |
-| **Test Candidate Pairs Generated** | 97,145,554 | Mean 56.07 candidates/entity (cap = 60); 6,825 entities with 0 candidates |
-| **Test Predicted Matches** | 4,185,700 | Mean 2.42 matches/entity; 358,202 predicted singletons (20.67%) |
-| **Submission Validation Status** | **PASS** | Audited via `utils/validate_submission.py` (exit code 0, 0 issues) |
+| **Test Candidate Pairs Generated** | 236,014,317 | Mean 136.2 candidates/entity; **0 entities with zero candidates** (was 6,825) |
+| **Test Predicted Matches** | 4,958,482 | Mean 2.86 matches/entity; 1,549,299 entities (89.4%) got >=1 match, 183,245 predicted singletons |
+| **Submission Validation Status** | **PASS** | `utils/validate_submission.py`: 1,732,544 rows in both files, 0 blocking issues |
 
 ---
 
