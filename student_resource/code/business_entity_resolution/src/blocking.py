@@ -24,6 +24,8 @@ from normalize import addr_tokens, name_tokens
 GENERAL_TOP_K = 40
 ADDR_TOP_K = 20
 PIN_TOP_K = 20
+GRAM_TOP_K = 15
+GRAM_N = 4
 S1_CHUNK_ROWS = 15_000  # S1 rows per join batch; bounds the merge intermediate
 MIN_PAIR_SCORE = 3.0   # minimum summed-IDF for a pair to be worth ranking (0 disables).
 MAX_TOKEN_DF = 5000    # drop tokens shared by more than this many candidates in a country.
@@ -58,6 +60,29 @@ def phonetic_tokens(df: pd.DataFrame, id_col: str, text_col: str) -> pd.DataFram
         "country": df["country"].to_numpy(),
         id_col: df[id_col].to_numpy(),
         "token": df[text_col].map(codes).to_numpy(),
+    }).explode("token")
+    return long.dropna(subset=["token"])
+
+
+def ngram_tokens(df: pd.DataFrame, id_col: str, text_col: str, n: int = GRAM_N) -> pd.DataFrame:
+    """Character n-grams of the space-stripped name; catches typos and glued names.
+
+    Whole-word tokens miss a one-character typo entirely ("organic"/"organik" share no
+    word) and miss glued names ("wilfordhancock.com"/"wilford hancock"). N-grams of both
+    still overlap. Note they do NOT rescue a heavily-mangled string -- "organic" and
+    "ornanac" share zero 4-grams -- so this is a typo/concatenation fix, not a
+    transliteration fix.
+    """
+    def grams(text: str):
+        s = text.replace(" ", "")
+        if len(s) < n:
+            return [s] if s else []
+        return list(dict.fromkeys(s[i:i + n] for i in range(len(s) - n + 1)))
+
+    long = pd.DataFrame({
+        "country": df["country"].to_numpy(),
+        id_col: df[id_col].to_numpy(),
+        "token": df[text_col].map(grams).to_numpy(),
     }).explode("token")
     return long.dropna(subset=["token"])
 
@@ -128,6 +153,8 @@ def _s1_long(s1: pd.DataFrame, fields=("name", "addr", "pin")) -> pd.DataFrame:
         parts.append(_token_index(s1, "source1_entity_id", "name_norm", name_tokens))
     if "phon" in fields:
         parts.append(phonetic_tokens(s1, "source1_entity_id", "name_norm"))
+    if "gram" in fields:
+        parts.append(ngram_tokens(s1, "source1_entity_id", "name_norm"))
     if "addr" in fields:
         parts.append(_token_index(s1, "source1_entity_id", "addr_norm", addr_tokens))
     if "pin" in fields:
@@ -190,6 +217,10 @@ def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str,
     )
     pin_idx = _weighted_index(raw_pin_idx, n_by_country)
     phonetic_idx = _weighted_index(phonetic_tokens(coded, "cand_code", "name_norm"), n_by_country)
+    # Tighter max_df than the word indexes: a 4-gram is far less selective than a word,
+    # so the common ones would fan the join out without adding evidence.
+    gram_idx = _weighted_index(ngram_tokens(coded, "cand_code", "name_norm"),
+                               n_by_country, max_df=2000)
 
     results = []
 
@@ -216,7 +247,15 @@ def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str,
         s1, pin_name_idx, PIN_TOP_K, ("pin", "name"), chunk_rows, f" {source_label}-pin"
     )
     results.append(res_pin)
-    del pin_name_idx, name_idx, addr_idx, pin_idx, phonetic_idx, raw_pin_idx, coded
+
+    # PASS 4: character n-grams (typos, glued names). Its own pass on purpose -- ranking
+    # is summed IDF, and a name yields ~18 n-grams against ~3 words, so folding grams
+    # into the general index would let gram mass outvote every word match.
+    res_gram = _block_chunked(
+        s1, gram_idx, GRAM_TOP_K, ("gram",), chunk_rows, f" {source_label}-gram"
+    )
+    results.append(res_gram)
+    del pin_name_idx, name_idx, addr_idx, pin_idx, phonetic_idx, raw_pin_idx, gram_idx, coded
 
     # Union all passes
     result = pd.concat(results, ignore_index=True)
