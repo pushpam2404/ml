@@ -46,7 +46,7 @@ BLOCK_PARALLEL = sys.platform != "darwin" and BLOCK_WORKERS > 1
 # intermediate is private (only the index is shared by fork), so peak memory is
 # workers x chunk. Reusing the serial 40k here OOM-killed a worker and broke the
 # pool. Sized so workers x this is about one serial chunk's worth in flight.
-PARALLEL_CHUNK_ROWS = 12_000
+PARALLEL_CHUNK_ROWS = 5_000
 _SHARED = {}
 MIN_PAIR_SCORE = 3.0   # minimum summed-IDF for a pair to be worth ranking (0 disables).
 MAX_TOKEN_DF = 5000    # drop tokens shared by more than this many candidates in a country.
