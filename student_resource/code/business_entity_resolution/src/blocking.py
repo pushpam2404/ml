@@ -46,7 +46,7 @@ BLOCK_PARALLEL = sys.platform != "darwin" and BLOCK_WORKERS > 1
 # intermediate is private (only the index is shared by fork), so peak memory is
 # workers x chunk. Reusing the serial 40k here OOM-killed a worker and broke the
 # pool. Sized so workers x this is about one serial chunk's worth in flight.
-PARALLEL_CHUNK_ROWS = 5_000
+PARALLEL_CHUNK_ROWS = 12_000
 _SHARED = {}
 MIN_PAIR_SCORE = 3.0   # minimum summed-IDF for a pair to be worth ranking (0 disables).
 MAX_TOKEN_DF = 5000    # drop tokens shared by more than this many candidates in a country.
@@ -234,8 +234,26 @@ def _block_chunked(s1: pd.DataFrame, index: pd.DataFrame, top_k: int, fields,
             return pd.concat(out, ignore_index=True) if out else pd.DataFrame(
                 columns=["source1_entity_id", "cand_code", "overlap"])
         except Exception as exc:
+            print(f"    [block{label}] parallel failed ({exc!r})", flush=True)
+            # A broken pool means a worker was OOM-killed, so halve and retry while
+            # still parallel. Dropping straight to serial costs ~7x, which on the
+            # full test set is the difference between hours and missing the deadline.
+            for retry_step in (step // 2, step // 4):
+                if retry_step < 500:
+                    break
+                rb = [(st, min(st + retry_step, len(s1)))
+                      for st in range(0, len(s1), retry_step)]
+                try:
+                    with ProcessPoolExecutor(max_workers=max(2, BLOCK_WORKERS // 2),
+                                             mp_context=mp.get_context("fork")) as ex:
+                        out = list(ex.map(_block_one_chunk, rb))
+                    print(f"    [block{label}] recovered at step={retry_step}", flush=True)
+                    _SHARED.clear()
+                    return pd.concat(out, ignore_index=True)
+                except Exception as exc2:
+                    print(f"    [block{label}] step={retry_step} failed ({exc2!r})", flush=True)
             _SHARED.clear()
-            print(f"    [block{label}] parallel failed ({exc!r}); serial fallback", flush=True)
+            print(f"    [block{label}] serial fallback", flush=True)
 
     out = []
     for i, start in enumerate(range(0, len(s1), chunk_rows), 1):
