@@ -42,6 +42,11 @@ S1_CHUNK_ROWS = 40_000  # S1 rows per join batch; bounds the merge intermediate
 # once. macOS fork is unsafe with threads, so it stays serial there.
 BLOCK_WORKERS = max(1, (os.cpu_count() or 2) - 1)
 BLOCK_PARALLEL = sys.platform != "darwin" and BLOCK_WORKERS > 1
+# Parallel chunks must be SMALLER, not the same size. Each worker's merge
+# intermediate is private (only the index is shared by fork), so peak memory is
+# workers x chunk. Reusing the serial 40k here OOM-killed a worker and broke the
+# pool. Sized so workers x this is about one serial chunk's worth in flight.
+PARALLEL_CHUNK_ROWS = 5_000
 _SHARED = {}
 MIN_PAIR_SCORE = 3.0   # minimum summed-IDF for a pair to be worth ranking (0 disables).
 MAX_TOKEN_DF = 5000    # drop tokens shared by more than this many candidates in a country.
@@ -209,9 +214,11 @@ def _block_chunked(s1: pd.DataFrame, index: pd.DataFrame, top_k: int, fields,
     so the fanned-out group-by and sort run on integers, then mapped back on the small
     capped result.
     """
-    bounds = [(st, min(st + chunk_rows, len(s1))) for st in range(0, len(s1), chunk_rows)]
+    par = BLOCK_PARALLEL and len(s1) > PARALLEL_CHUNK_ROWS
+    step = min(chunk_rows, PARALLEL_CHUNK_ROWS) if par else chunk_rows
+    bounds = [(st, min(st + step, len(s1))) for st in range(0, len(s1), step)]
     n_chunks = max(1, len(bounds))
-    if BLOCK_PARALLEL and len(bounds) > 1:
+    if par and len(bounds) > 1:
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor
         # Populate the globals BEFORE forking: children inherit them copy-on-write, so
