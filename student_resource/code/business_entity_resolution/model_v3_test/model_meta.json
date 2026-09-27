@@ -1,0 +1,33 @@
+{
+  "feature_cols": [
+    "name_jaccard",
+    "name_trigram_jaccard",
+    "name_token_sort_ratio",
+    "name_partial_ratio",
+    "name_len_diff",
+    "addr_jaccard",
+    "addr_ratio",
+    "pin_match",
+    "house_match",
+    "addr_empty_either",
+    "name_jaro_winkler",
+    "name_levenshtein",
+    "addr_token_sort_ratio",
+    "addr_partial_ratio",
+    "name_token_set_ratio",
+    "name_overlap_coeff",
+    "addr_jaro_winkler",
+    "addr_trigram_jaccard",
+    "name_len_ratio",
+    "pin_and_addr_present",
+    "name_phonetic_match"
+  ],
+  "selection_rule": "expected_f",
+  "threshold": 0.65,
+  "val_macro_f0_5": 0.8316989724053221,
+  "val_macro_f0_5_threshold_rule": 0.8316225001645197,
+  "val_macro_f0_5_expected_f_rule": 0.8316989724053221,
+  "blocking_recall_ceiling": 0.8199143945442884,
+  "n_train_pairs": 2439894,
+  "n_val_pairs": 271179
+}
