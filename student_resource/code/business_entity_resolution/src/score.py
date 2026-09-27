@@ -16,7 +16,7 @@ import pandas as pd
 from data_io import attach_pair_columns
 from features import build_pair_features
 
-PAIR_CHUNK_ROWS = 2_000_000
+PAIR_CHUNK_ROWS = 6_000_000
 # Rows handed to one worker. Small enough that pickling the hydrated strings stays
 # cheap and slow chunks cannot stall the pool, large enough to amortise the handoff.
 WORKER_CHUNK_ROWS = 100_000

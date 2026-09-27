@@ -11,6 +11,9 @@ per (S1, candidate) pair, already capped to top-K per S1 per source. This is
 exactly the candidate set later written to candidate_pairs.tsv and fed to the
 feature/model stage.
 """
+import os
+import sys
+
 import numpy as np
 import pandas as pd
 import jellyfish
@@ -32,7 +35,14 @@ GRAM_N = 4
 # real cost of this pass, not the index size. Grams that common carry little
 # signal anyway and IDF already down-weights them.
 GRAM_MAX_DF = 500
-S1_CHUNK_ROWS = 15_000  # S1 rows per join batch; bounds the merge intermediate
+S1_CHUNK_ROWS = 40_000  # S1 rows per join batch; bounds the merge intermediate
+# Chunks are independent (the demo asserts chunking cannot change the candidate set),
+# so they run in parallel. Only via fork: the candidate index is several GB and fork
+# shares it copy-on-write, where spawn would pickle a fresh copy into all 7 workers at
+# once. macOS fork is unsafe with threads, so it stays serial there.
+BLOCK_WORKERS = max(1, (os.cpu_count() or 2) - 1)
+BLOCK_PARALLEL = sys.platform != "darwin" and BLOCK_WORKERS > 1
+_SHARED = {}
 MIN_PAIR_SCORE = 3.0   # minimum summed-IDF for a pair to be worth ranking (0 disables).
 MAX_TOKEN_DF = 5000    # drop tokens shared by more than this many candidates in a country.
 
@@ -172,6 +182,19 @@ def _s1_long(s1: pd.DataFrame, fields=("name", "addr", "pin")) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)
 
 
+def _block_one_chunk(bounds):
+    """One S1 row-range against the inherited index. Body mirrors the serial loop."""
+    start, stop = bounds
+    chunk = _SHARED["s1"].iloc[start:stop]
+    s1_long = _s1_long(chunk, _SHARED["fields"])
+    codes, uniques = pd.factorize(s1_long["source1_entity_id"])
+    s1_long = s1_long.drop(columns=["source1_entity_id"])
+    s1_long["s1_code"] = codes.astype("int32")
+    res = _candidates_from_index(s1_long, _SHARED["index"], _SHARED["top_k"])
+    return res.assign(source1_entity_id=uniques.take(res["s1_code"].to_numpy())) \
+              .drop(columns=["s1_code"])
+
+
 def _block_chunked(s1: pd.DataFrame, index: pd.DataFrame, top_k: int, fields,
                    chunk_rows: int = S1_CHUNK_ROWS, label: str = "") -> pd.DataFrame:
     """Run the token join in S1 row-chunks, returning [source1_entity_id, cand_code, overlap].
@@ -186,8 +209,28 @@ def _block_chunked(s1: pd.DataFrame, index: pd.DataFrame, top_k: int, fields,
     so the fanned-out group-by and sort run on integers, then mapped back on the small
     capped result.
     """
+    bounds = [(st, min(st + chunk_rows, len(s1))) for st in range(0, len(s1), chunk_rows)]
+    n_chunks = max(1, len(bounds))
+    if BLOCK_PARALLEL and len(bounds) > 1:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        # Populate the globals BEFORE forking: children inherit them copy-on-write, so
+        # the multi-GB index is never copied or pickled.
+        _SHARED["s1"], _SHARED["index"] = s1, index
+        _SHARED["top_k"], _SHARED["fields"] = top_k, fields
+        try:
+            with ProcessPoolExecutor(max_workers=BLOCK_WORKERS,
+                                     mp_context=mp.get_context("fork")) as ex:
+                out = list(ex.map(_block_one_chunk, bounds))
+            print(f"    [block{label}] {n_chunks} chunks on {BLOCK_WORKERS} workers", flush=True)
+            _SHARED.clear()
+            return pd.concat(out, ignore_index=True) if out else pd.DataFrame(
+                columns=["source1_entity_id", "cand_code", "overlap"])
+        except Exception as exc:
+            _SHARED.clear()
+            print(f"    [block{label}] parallel failed ({exc!r}); serial fallback", flush=True)
+
     out = []
-    n_chunks = max(1, -(-len(s1) // chunk_rows))
     for i, start in enumerate(range(0, len(s1), chunk_rows), 1):
         chunk = s1.iloc[start:start + chunk_rows]
         s1_long = _s1_long(chunk, fields)
