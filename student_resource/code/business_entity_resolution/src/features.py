@@ -166,7 +166,9 @@ def build_pair_features(pairs: pd.DataFrame) -> pd.DataFrame:
         for a, b in zip(pairs["name_norm_1"], pairs["name_norm_2"])
     ]
 
-    return out[FEATURE_COLS]
+    # float32 throughout: these are similarity scores, and float64 doubles the
+    # feature matrix for no accuracy the model can use.
+    return out[FEATURE_COLS].astype("float32")
 
 
 def demo():

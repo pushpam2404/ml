@@ -26,6 +26,12 @@ ADDR_TOP_K = 20
 PIN_TOP_K = 20
 GRAM_TOP_K = 15
 GRAM_N = 4
+# Much tighter than the word indexes. A 4-gram is far less selective, so the join
+# fans out as (grams per name) x (df per gram) -- ~18x the average df. At df 2000
+# that intermediate runs to hundreds of millions of rows per chunk, which is the
+# real cost of this pass, not the index size. Grams that common carry little
+# signal anyway and IDF already down-weights them.
+GRAM_MAX_DF = 500
 S1_CHUNK_ROWS = 15_000  # S1 rows per join batch; bounds the merge intermediate
 MIN_PAIR_SCORE = 3.0   # minimum summed-IDF for a pair to be worth ranking (0 disables).
 MAX_TOKEN_DF = 5000    # drop tokens shared by more than this many candidates in a country.
@@ -220,7 +226,7 @@ def block_one_source(s1: pd.DataFrame, cand: pd.DataFrame, source_label: str,
     # Tighter max_df than the word indexes: a 4-gram is far less selective than a word,
     # so the common ones would fan the join out without adding evidence.
     gram_idx = _weighted_index(ngram_tokens(coded, "cand_code", "name_norm"),
-                               n_by_country, max_df=2000)
+                               n_by_country, max_df=GRAM_MAX_DF)
 
     results = []
 
