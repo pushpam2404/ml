@@ -21,8 +21,7 @@ zip -qr "$ZIP" \
     output/candidate_pairs.tsv \
     Documentation_template.md \
     code/business_entity_resolution \
-    -x '*/.venv/*' '*/__pycache__/*' '*.parquet' '*/model_dryrun/*' \
-       '*/model_tune_sample/*' '*/model_v2_test/*' '*/model_v3_test/*'
+    -x '*/.venv/*' '*/__pycache__/*' '*/.pytest_cache/*' '*.parquet' '*/model_*/*' '*/tests/*'
 echo "built $ZIP"
 du -h "$ZIP"
 unzip -l "$ZIP" | tail -3

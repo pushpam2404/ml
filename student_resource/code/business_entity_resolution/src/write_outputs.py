@@ -16,7 +16,11 @@ def pairs_to_id_map(pairs: pd.DataFrame, s1_col="source1_entity_id", id_col="can
     return pairs.groupby(s1_col)[id_col].apply(set).to_dict()
 
 
-def demo(tmp_path="/tmp/_wo_demo.tsv"):
+def demo():
+    import os
+    import tempfile
+
+    tmp_path = os.path.join(tempfile.mkdtemp(), "demo.tsv")
     id_map = {"S1-1": {"S2-1", "S2-1", "S3-2"}, "S1-2": set()}
     write_id_list_tsv(tmp_path, ["S1-1", "S1-2", "S1-3"], id_map, "matched_entity_ids")
     df = pd.read_csv(tmp_path, sep="\t", dtype=str, keep_default_na=False)

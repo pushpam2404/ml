@@ -1,13 +1,16 @@
 # ML Challenge 2026: Business Entity Resolution Solution Template
 
-**Team Name:** [Your Team Name]
-**Team Members:** [List all team members]
-**Submission Date:** 2026-09-26
+**Team:** Pushpam Raj Satyarthi (GitHub pushpam2404)
+**Submission Date:** 2026-09-26 (first version), final model 2026-09-27
 
-> **STATUS: Fully populated.** Training metrics filled from the full-scale run;
-> test-set candidate and matching statistics populated from audited test outputs
-> (`output/candidate_pairs.tsv` and `output/matching_results.tsv`). Validated with
-> zero blocking issues via `utils/validate_submission.py`.
+> **Read this first.** This write-up was filled in during the challenge and was only
+> partly updated afterwards. Sections 3, 4 and 5 describe the *first* model: one
+> blocking pass, 10 features, depth-5
+> trees, validation macro F_0.5 of 0.7028. The final model is the one in
+> `code/business_entity_resolution/model/` (21 features, depth-7 trees, four blocking
+> passes, validation macro F_0.5 of 0.8512). Its numbers are in Appendix B and in
+> `model/model_meta.json`. Items 1 and 2 of the "next steps" in section 5 (a per-entity selection rule and
+> character n-gram keys) were built afterwards; item 3 was not.
 
 ---
 
